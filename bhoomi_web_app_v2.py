@@ -155,6 +155,10 @@ class SearchState:
     # File paths
     all_records_file: str = ''
     matches_file: str = ''
+    
+    # Real-time records storage (for UI display)
+    all_records: List[Dict] = field(default_factory=list)
+    matches: List[Dict] = field(default_factory=list)
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # THREAD-SAFE CSV WRITER
@@ -538,15 +542,27 @@ class SearchWorker:
                                         worker_id=self.worker_id
                                     )
                                     
-                                    # Write to all records
-                                    self.all_records_writer.write_record(asdict(record))
+                                    record_dict = asdict(record)
+                                    
+                                    # Write to all records CSV
+                                    self.all_records_writer.write_record(record_dict)
                                     self.records_found += 1
+                                    
+                                    # Add to state for real-time UI display
+                                    with self.state_lock:
+                                        self.state.all_records.append(record_dict)
+                                        # Keep only last 500 records in memory for UI
+                                        if len(self.state.all_records) > 500:
+                                            self.state.all_records = self.state.all_records[-500:]
                                     
                                     # Check for match
                                     is_match = any(v.lower() in owner['owner_name'].lower() for v in owner_variants if v)
                                     if is_match:
-                                        self.matches_writer.write_record(asdict(record))
+                                        self.matches_writer.write_record(record_dict)
                                         self.matches_found += 1
+                                        # Add to matches list for UI
+                                        with self.state_lock:
+                                            self.state.matches.append(record_dict)
                                         self._add_log(f"🎯 MATCH: {owner['owner_name']} in {village_name} Sy:{survey_no}")
                                 
                                 # Update stats
@@ -863,6 +879,9 @@ class ParallelSearchCoordinator:
                 'all_records_file': self.state.all_records_file,
                 'matches_file': self.state.matches_file,
                 'logs': self.state.logs[-20:],  # Last 20 logs
+                # Real-time records for UI (last 100)
+                'all_records': self.state.all_records[-100:],
+                'matches': self.state.matches,
                 'workers': {
                     str(wid): {
                         'status': ws.status,
@@ -1304,6 +1323,84 @@ HTML_TEMPLATE = '''
         
         @keyframes spin { to { transform: rotate(360deg); } }
         
+        /* Tab Buttons */
+        .tab-btn {
+            padding: 0.6rem 1rem;
+            background: var(--bg-input);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            color: var(--text-secondary);
+            font-family: inherit;
+            font-size: 0.85rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+        
+        .tab-btn:hover { border-color: var(--accent-primary); color: var(--text-primary); }
+        .tab-btn.active { background: var(--accent-primary); border-color: var(--accent-primary); color: var(--bg-primary); }
+        
+        .badge {
+            background: var(--bg-secondary);
+            padding: 0.15rem 0.5rem;
+            border-radius: 10px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+        
+        .tab-btn.active .badge { background: rgba(0,0,0,0.2); color: var(--bg-primary); }
+        .match-badge { background: var(--success) !important; color: white !important; }
+        
+        /* Data Table */
+        .table-container {
+            max-height: 350px;
+            overflow-y: auto;
+            border-radius: 10px;
+            border: 1px solid var(--border-color);
+        }
+        
+        .data-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 0.85rem;
+        }
+        
+        .data-table th {
+            background: var(--bg-secondary);
+            padding: 0.75rem 1rem;
+            text-align: left;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            font-size: 0.7rem;
+            letter-spacing: 0.5px;
+            position: sticky;
+            top: 0;
+            z-index: 1;
+        }
+        
+        .data-table td {
+            padding: 0.6rem 1rem;
+            border-bottom: 1px solid var(--border-color);
+            color: var(--text-primary);
+        }
+        
+        .data-table tr:hover td { background: rgba(245, 158, 11, 0.05); }
+        .data-table tr.match-row td { background: rgba(16, 185, 129, 0.1); }
+        .data-table tr.match-row:hover td { background: rgba(16, 185, 129, 0.15); }
+        
+        .empty-row {
+            text-align: center;
+            color: var(--text-muted);
+            padding: 2rem !important;
+        }
+        
+        .owner-cell { font-weight: 500; }
+        .owner-cell.match { color: var(--success); }
+        
         /* Responsive */
         @media (max-width: 1200px) {
             .main-container { grid-template-columns: 1fr; }
@@ -1451,14 +1548,64 @@ HTML_TEMPLATE = '''
                 </div>
             </div>
             
-            <!-- Activity Log -->
-            <div class="card">
+            <!-- Records Table with Tabs -->
+            <div class="card" style="margin-bottom: 1rem;">
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
-                    <h3 class="card-title" style="margin: 0;">Activity Log</h3>
+                    <div style="display: flex; gap: 0.5rem;">
+                        <button class="tab-btn active" id="tabRecords" onclick="switchTab('records')">
+                            📋 All Records <span class="badge" id="recordsBadge">0</span>
+                        </button>
+                        <button class="tab-btn" id="tabMatches" onclick="switchTab('matches')">
+                            🎯 Matches <span class="badge match-badge" id="matchesBadge">0</span>
+                        </button>
+                    </div>
                     <button id="exportBtn" class="btn btn-sm" style="background: var(--bg-input); border: 1px solid var(--border-color);">
                         📥 Export CSV
                     </button>
                 </div>
+                
+                <!-- Records Table -->
+                <div class="table-container" id="recordsTable">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Village</th>
+                                <th>Survey</th>
+                                <th>Hissa</th>
+                                <th>Owner Name</th>
+                                <th>Extent</th>
+                                <th>Worker</th>
+                            </tr>
+                        </thead>
+                        <tbody id="recordsBody">
+                            <tr><td colspan="6" class="empty-row">No records yet. Start a search to see results.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                
+                <!-- Matches Table (hidden by default) -->
+                <div class="table-container" id="matchesTable" style="display: none;">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Village</th>
+                                <th>Survey</th>
+                                <th>Hissa</th>
+                                <th>Owner Name</th>
+                                <th>Extent</th>
+                                <th>Khatah</th>
+                            </tr>
+                        </thead>
+                        <tbody id="matchesBody">
+                            <tr><td colspan="6" class="empty-row">No matches found yet.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            
+            <!-- Activity Log -->
+            <div class="card">
+                <h3 class="card-title">Activity Log</h3>
                 <div class="logs-container" id="logsContainer">
                     <div class="log-entry">Ready to start parallel search...</div>
                 </div>
@@ -1668,6 +1815,10 @@ HTML_TEMPLATE = '''
                 document.getElementById('totalMatches').textContent = status.total_matches;
                 document.getElementById('activeWorkers').textContent = status.active_workers;
                 
+                // Update badges
+                document.getElementById('recordsBadge').textContent = status.total_records;
+                document.getElementById('matchesBadge').textContent = status.total_matches;
+                
                 // Update workers
                 if (status.workers) {
                     Object.entries(status.workers).forEach(([id, w]) => {
@@ -1681,6 +1832,14 @@ HTML_TEMPLATE = '''
                                 `<span>${w.villages_completed}/${w.villages_total} villages</span><span>${w.records_found} records</span>`;
                         }
                     });
+                }
+                
+                // Update records tables (real-time)
+                if (status.all_records) {
+                    updateRecordsTable(status.all_records);
+                }
+                if (status.matches) {
+                    updateMatchesTable(status.matches);
                 }
                 
                 // Update logs
@@ -1706,6 +1865,63 @@ HTML_TEMPLATE = '''
             entry.className = 'log-entry';
             entry.textContent = new Date().toLocaleTimeString() + ' - ' + message;
             container.insertBefore(entry, container.firstChild);
+        }
+        
+        // Tab switching
+        let currentTab = 'records';
+        
+        function switchTab(tab) {
+            currentTab = tab;
+            
+            // Update tab buttons
+            document.getElementById('tabRecords').classList.toggle('active', tab === 'records');
+            document.getElementById('tabMatches').classList.toggle('active', tab === 'matches');
+            
+            // Show/hide tables
+            document.getElementById('recordsTable').style.display = tab === 'records' ? 'block' : 'none';
+            document.getElementById('matchesTable').style.display = tab === 'matches' ? 'block' : 'none';
+        }
+        
+        // Update records table
+        function updateRecordsTable(records) {
+            const tbody = document.getElementById('recordsBody');
+            if (!records || records.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-row">No records yet. Start a search to see results.</td></tr>';
+                return;
+            }
+            
+            // Show last 50 records (most recent first)
+            const recentRecords = records.slice(-50).reverse();
+            tbody.innerHTML = recentRecords.map(r => `
+                <tr>
+                    <td>${r.village || ''}</td>
+                    <td>${r.survey_no || ''}</td>
+                    <td>${r.hissa || ''}</td>
+                    <td class="owner-cell kannada">${r.owner_name || ''}</td>
+                    <td>${r.extent || ''}</td>
+                    <td>W${r.worker_id || 0}</td>
+                </tr>
+            `).join('');
+        }
+        
+        // Update matches table
+        function updateMatchesTable(matches) {
+            const tbody = document.getElementById('matchesBody');
+            if (!matches || matches.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="6" class="empty-row">No matches found yet.</td></tr>';
+                return;
+            }
+            
+            tbody.innerHTML = matches.map(r => `
+                <tr class="match-row">
+                    <td>${r.village || ''}</td>
+                    <td>${r.survey_no || ''}</td>
+                    <td>${r.hissa || ''}</td>
+                    <td class="owner-cell match kannada">${r.owner_name || ''}</td>
+                    <td>${r.extent || ''}</td>
+                    <td>${r.khatah || ''}</td>
+                </tr>
+            `).join('');
         }
         
         async function exportCSV() {
