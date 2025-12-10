@@ -52,8 +52,9 @@ class Config:
     PORT = 5001
     DEBUG = True
     
-    # Parallel Processing - Use 2 workers on Windows to avoid Chrome crashes
-    MAX_WORKERS = 2 if platform.system() == 'Windows' else 4
+    # Parallel Processing - 4 workers on all platforms
+    MAX_WORKERS = 4
+    WORKER_STARTUP_DELAY = 3 if platform.system() == 'Windows' else 1  # Stagger startup on Windows
     
     # Timeouts (seconds)
     PAGE_LOAD_TIMEOUT = 30
@@ -407,7 +408,9 @@ class SearchWorker:
                     options.add_argument('--mute-audio')
                     options.add_argument('--no-first-run')
                     options.add_argument('--safebrowsing-disable-auto-update')
-                    # Don't use custom user data dir on Windows - causes crashes
+                    # Use unique debugging port per worker to avoid conflicts
+                    debug_port = 9222 + self.worker_id + (os.getpid() % 100)
+                    options.add_argument(f'--remote-debugging-port={debug_port}')
                 else:
                     # Use custom user data dir only on non-Windows
                     user_data_dir = os.path.join(tempfile.gettempdir(), f'chrome_worker_{self.worker_id}_{os.getpid()}')
@@ -943,7 +946,7 @@ class ParallelSearchCoordinator:
             with self.state_lock:
                 self.state.logs.append(f"Starting {num_workers} workers for {len(villages)} villages")
             
-            # Start workers
+            # Start workers with staggered startup to avoid Chrome conflicts
             self.executor = ThreadPoolExecutor(max_workers=num_workers)
             
             for i in range(num_workers):
@@ -958,6 +961,12 @@ class ParallelSearchCoordinator:
                 )
                 self.workers.append(worker)
                 self.executor.submit(worker.run)
+                
+                # Staggered startup on Windows to prevent Chrome crashes
+                if i < num_workers - 1:  # Don't wait after last worker
+                    time.sleep(Config.WORKER_STARTUP_DELAY)
+                    with self.state_lock:
+                        self.state.logs.append(f"Worker {i} started, launching next...")
             
             # Start completion monitor
             threading.Thread(target=self._monitor_completion, daemon=True).start()
