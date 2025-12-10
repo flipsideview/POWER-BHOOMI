@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════════════╗
-║                      POWER-BHOOMI v2.0 - PARALLEL SEARCH ENGINE                      ║
+║                  POWER-BHOOMI v2.2 - MAC EDITION (4 WORKERS)                         ║
 ║                        Karnataka Land Records Search Tool                             ║
 ╠══════════════════════════════════════════════════════════════════════════════════════╣
 ║  Features:                                                                            ║
-║  • Parallel browser processing (4x faster)                                           ║
-║  • Thread-safe CSV output                                                            ║
-║  • Real-time multi-worker progress tracking                                          ║
-║  • Smart error recovery and retry logic                                              ║
-║  • Professional, production-ready code                                               ║
+║  • 4 parallel browser workers (optimized for macOS)                                  ║
+║  • Fast timeouts for maximum speed                                                   ║
+║  • Sequential survey iteration (1, 2, 3... no skips)                                 ║
+║  • Thread-safe CSV output to Downloads                                               ║
+║  • Real-time progress with survey tracking                                           ║
+║  • Robust error recovery                                                             ║
 ╚══════════════════════════════════════════════════════════════════════════════════════╝
 
-Version: 2.0.0
+Version: 2.2.0-Mac
 Author: POWER-BHOOMI Team
 """
 
@@ -46,25 +47,25 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 class Config:
-    """Application configuration"""
+    """Mac-optimized configuration for speed"""
     # Server
     HOST = '0.0.0.0'
     PORT = 5001
     DEBUG = True
     
-    # Parallel Processing - 4 workers on all platforms
+    # Parallel Processing - 4 fast workers for Mac
     MAX_WORKERS = 4
-    WORKER_STARTUP_DELAY = 3 if platform.system() == 'Windows' else 1  # Stagger startup on Windows
+    WORKER_STARTUP_DELAY = 0.5  # Fast startup on Mac
     
-    # Timeouts (seconds)
-    PAGE_LOAD_TIMEOUT = 30
-    ELEMENT_WAIT_TIMEOUT = 10
-    POST_CLICK_WAIT = 6
-    POST_SELECT_WAIT = 2
+    # Timeouts (seconds) - Optimized for Mac speed
+    PAGE_LOAD_TIMEOUT = 20
+    ELEMENT_WAIT_TIMEOUT = 8
+    POST_CLICK_WAIT = 4  # Faster clicks
+    POST_SELECT_WAIT = 1.5  # Faster selections
     
-    # Search Settings
+    # Search Settings - NO SURVEY SKIPPING
     DEFAULT_MAX_SURVEY = 200
-    EMPTY_SURVEY_THRESHOLD = 50  # Skip village after this many consecutive empty surveys
+    EMPTY_SURVEY_THRESHOLD = 100  # High threshold to avoid premature skipping
     
     # URLs
     ECHAWADI_BASE = "https://rdservices.karnataka.gov.in/echawadi/Home"
@@ -358,26 +359,19 @@ class SearchWorker:
             self.state.active_workers = active_workers
     
     def _init_browser(self, retry_count: int = 3):
-        """Initialize browser with optimized settings and retry logic"""
+        """Initialize browser - Mac optimized for speed"""
         import shutil
         import tempfile
-        import platform
-        import subprocess
         from selenium import webdriver
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.chrome.service import Service
         from webdriver_manager.chrome import ChromeDriverManager
         
-        is_windows = platform.system() == 'Windows'
-        
-        # Kill any hanging Chrome processes on Windows before starting
-        if is_windows and self.worker_id == 0:
+        # Clean user data directory for this worker
+        user_data_dir = os.path.join(tempfile.gettempdir(), f'bhoomi_chrome_{self.worker_id}')
+        if os.path.exists(user_data_dir):
             try:
-                subprocess.run(['taskkill', '/F', '/IM', 'chrome.exe'], 
-                             capture_output=True, timeout=5)
-                subprocess.run(['taskkill', '/F', '/IM', 'chromedriver.exe'], 
-                             capture_output=True, timeout=5)
-                time.sleep(1)
+                shutil.rmtree(user_data_dir)
             except:
                 pass
         
@@ -386,52 +380,45 @@ class SearchWorker:
             try:
                 options = Options()
                 
-                # Use new headless mode for better Windows compatibility
+                # Mac-optimized headless Chrome settings
                 options.add_argument('--headless=new')
                 options.add_argument('--no-sandbox')
                 options.add_argument('--disable-dev-shm-usage')
                 options.add_argument('--disable-gpu')
                 options.add_argument('--window-size=1920,1080')
+                
+                # Speed optimizations - disable unnecessary features
                 options.add_argument('--disable-extensions')
                 options.add_argument('--disable-images')
                 options.add_argument('--blink-settings=imagesEnabled=false')
-                options.add_argument('--disable-software-rasterizer')
+                options.add_argument('--disable-javascript-harmony-shipping')
+                options.add_argument('--disable-background-networking')
+                options.add_argument('--disable-sync')
+                options.add_argument('--disable-translate')
+                options.add_argument('--disable-default-apps')
+                options.add_argument('--mute-audio')
+                options.add_argument('--no-first-run')
                 
-                # Windows-specific fixes
-                if is_windows:
-                    options.add_argument('--disable-features=VizDisplayCompositor')
-                    options.add_argument('--disable-background-networking')
-                    options.add_argument('--disable-default-apps')
-                    options.add_argument('--disable-sync')
-                    options.add_argument('--disable-translate')
-                    options.add_argument('--metrics-recording-only')
-                    options.add_argument('--mute-audio')
-                    options.add_argument('--no-first-run')
-                    options.add_argument('--safebrowsing-disable-auto-update')
-                    # Use unique debugging port per worker to avoid conflicts
-                    debug_port = 9222 + self.worker_id + (os.getpid() % 100)
-                    options.add_argument(f'--remote-debugging-port={debug_port}')
-                else:
-                    # Use custom user data dir only on non-Windows
-                    user_data_dir = os.path.join(tempfile.gettempdir(), f'chrome_worker_{self.worker_id}_{os.getpid()}')
-                    if os.path.exists(user_data_dir):
-                        try:
-                            shutil.rmtree(user_data_dir)
-                        except:
-                            pass
-                    options.add_argument(f'--user-data-dir={user_data_dir}')
+                # Unique user data dir per worker
+                options.add_argument(f'--user-data-dir={user_data_dir}')
+                
+                # Page load strategy - don't wait for all resources
+                options.page_load_strategy = 'eager'
                 
                 service = Service(ChromeDriverManager().install())
                 self.driver = webdriver.Chrome(service=service, options=options)
                 self.driver.set_page_load_timeout(Config.PAGE_LOAD_TIMEOUT)
                 
-                self._add_log(f"Browser initialized (attempt {attempt + 1})")
+                # Implicit wait for elements
+                self.driver.implicitly_wait(2)
+                
+                self._add_log(f"✅ Worker {self.worker_id} browser ready!")
                 return  # Success
                 
             except Exception as e:
                 last_error = e
                 self._add_log(f"Browser init failed (attempt {attempt + 1}): {str(e)[:50]}")
-                time.sleep(3)  # Wait longer before retry on Windows
+                time.sleep(1)  # Quick retry on Mac
                 
                 # Cleanup failed attempt
                 try:
@@ -513,23 +500,28 @@ class SearchWorker:
         )
         
         empty_count = 0
+        surveys_checked = 0
+        surveys_with_data = 0
         
+        # SEQUENTIAL SURVEY ITERATION: 1, 2, 3... NO SKIPPING
         for survey_no in range(1, max_survey + 1):
             if not self.state.running:
+                self._add_log(f"⏹️ Stopped at survey {survey_no}/{max_survey}")
                 return
             
+            surveys_checked += 1
             self._update_status(current_survey=survey_no)
             
-            # Log every 10th survey number for progress tracking
-            if survey_no == 1 or survey_no % 10 == 0:
-                self._add_log(f"📍 {village_name}: Checking survey {survey_no}/{max_survey}")
+            # Log every 5th survey for better tracking
+            if survey_no == 1 or survey_no % 5 == 0:
+                self._add_log(f"📍 {village_name}: Survey {survey_no}/{max_survey} (found {surveys_with_data})")
             
             try:
                 # Navigate to portal
                 self.driver.get(Config.SERVICE2_URL)
                 time.sleep(Config.POST_SELECT_WAIT)
                 
-                # Select location
+                # Select location (fast sequence)
                 Select(self.driver.find_element(By.ID, IDS['district'])).select_by_value(self.params['district_code'])
                 time.sleep(Config.POST_SELECT_WAIT)
                 
@@ -550,7 +542,7 @@ class SearchWorker:
                 # Click GO using JavaScript
                 go_btn = self.driver.find_element(By.ID, IDS['go_btn'])
                 self.driver.execute_script("arguments[0].click();", go_btn)
-                time.sleep(Config.POST_CLICK_WAIT + 2)
+                time.sleep(Config.POST_CLICK_WAIT)
                 
                 # Check if surnoc populated
                 surnoc_sel = Select(self.driver.find_element(By.ID, IDS['surnoc']))
@@ -558,13 +550,16 @@ class SearchWorker:
                 
                 if not surnoc_opts:
                     empty_count += 1
+                    # Only skip village if we've had MANY consecutive empty surveys
                     if empty_count > Config.EMPTY_SURVEY_THRESHOLD:
-                        self._add_log(f"Skipping {village_name} after {empty_count} empty surveys")
+                        self._add_log(f"⏭️ {village_name}: {empty_count} consecutive empty surveys, moving on...")
+                        self._add_log(f"📊 {village_name} Summary: Checked {surveys_checked}, Found data in {surveys_with_data}")
                         break
                     continue
                 
-                # Found data - reset empty count
+                # Found data - reset empty count and increment found count
                 empty_count = 0
+                surveys_with_data += 1
                 
                 # Process each surnoc
                 for surnoc in surnoc_opts:
@@ -1064,7 +1059,7 @@ HTML_TEMPLATE = '''
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>POWER-BHOOMI v2.0 | Parallel Search Engine</title>
+    <title>POWER-BHOOMI v2.2 | Mac Edition</title>
     <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&family=Noto+Sans+Kannada:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         :root {
@@ -1567,7 +1562,7 @@ HTML_TEMPLATE = '''
                     <p>Parallel Search Engine</p>
                 </div>
             </div>
-            <div class="version-badge">v2.0 • 4x Faster</div>
+            <div class="version-badge">v2.2 Mac • 4 Workers</div>
         </div>
     </header>
     
@@ -2469,13 +2464,14 @@ def get_files_info():
 if __name__ == '__main__':
     print("""
 ╔══════════════════════════════════════════════════════════════════════════════════════╗
-║                      POWER-BHOOMI v2.0 - PARALLEL SEARCH ENGINE                      ║
+║                  POWER-BHOOMI v2.2 - MAC EDITION (4 WORKERS)                         ║
 ╠══════════════════════════════════════════════════════════════════════════════════════╣
 ║                                                                                      ║
-║   🚀 4 Parallel Browser Workers                                                      ║
-║   📊 Thread-Safe CSV Output                                                          ║
-║   ⚡ Real-Time Multi-Worker Progress                                                 ║
-║   🛡️ Smart Error Recovery                                                            ║
+║   🍎 Optimized for macOS                                                             ║
+║   🚀 4 Fast Parallel Browser Workers                                                 ║
+║   📊 Sequential Survey Checking (1, 2, 3... no skips)                                ║
+║   ⚡ Speed-Optimized Timeouts                                                        ║
+║   📁 CSV Auto-Saves to Downloads                                                     ║
 ║                                                                                      ║
 ║   🌐 Open your browser and navigate to:                                              ║
 ║                                                                                      ║
