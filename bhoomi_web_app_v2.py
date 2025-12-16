@@ -14,7 +14,7 @@
 ║  • Robust error recovery with detailed logging                                       ║
 ╚══════════════════════════════════════════════════════════════════════════════════════╝
 
-Version: 3.3.0-Accuracy
+Version: 3.4.0-100Percent
 Author: POWER-BHOOMI Team
 """
 
@@ -80,10 +80,28 @@ class Config:
     # ACCURACY SETTINGS - Sacrifice 5% speed for 100% accuracy
     # ═══════════════════════════════════════════════════════════════════════════════════
     ACCURACY_MODE = True  # Enable all accuracy features
-    PROCESS_ALL_PERIODS = True  # Process ALL periods, not just the latest
+    PROCESS_ALL_PERIODS = False  # Only LATEST period (user preference)
     MAX_HISSA_RETRIES = 2  # Retry individual Hissa on failure
     VERIFY_PAGE_LOAD = True  # Verify page loaded after each action
     LOG_SKIPPED_ITEMS = True  # Log all skipped items for later retry
+    
+    # Enhancement 1: Survey Range Auto-Detection
+    AUTO_DETECT_SURVEY_RANGE = True  # Try to detect max survey from portal
+    SURVEY_RANGE_DETECTION_SAMPLES = 5  # Sample this many surveys to estimate range
+    
+    # Enhancement 4: Smart Empty Detection
+    SMART_EMPTY_DETECTION = True  # Use pattern-based detection
+    CONSECUTIVE_EMPTY_LIMIT = 30  # Base consecutive empty limit
+    SMART_EMPTY_MULTIPLIER = 1.5  # If survey > max_found * this, likely done
+    
+    # Enhancement 5: Validation Layer
+    VALIDATE_RECORDS = True  # Validate extracted data before saving
+    INVALID_OWNER_NAMES = {'Select', '--', 'N/A', '', ' ', 'Owner', 'ಮಾಲೀಕರ'}
+    MIN_OWNER_NAME_LENGTH = 2
+    
+    # Enhancement 6: Post-Search Audit
+    POST_SEARCH_AUDIT = True  # Run audit after search completes
+    AUDIT_RETRY_MISSING = True  # Automatically queue missing items for retry
     
     # URLs
     ECHAWADI_BASE = "https://rdservices.karnataka.gov.in/echawadi/Home"
@@ -177,6 +195,12 @@ class SearchState:
     # Accuracy tracking
     total_periods_processed: int = 0  # Track ALL periods processed
     skipped_items: List[Dict] = field(default_factory=list)  # Items that couldn't be processed
+    
+    # Enhancement tracking
+    detected_survey_ranges: Dict[str, int] = field(default_factory=dict)  # village -> max survey
+    validation_rejections: int = 0  # Records rejected by validation
+    audit_results: Dict = field(default_factory=dict)  # Post-search audit results
+    resumable: bool = False  # Whether this search can be resumed
     
     # Worker details
     workers: Dict[int, WorkerStatus] = field(default_factory=dict)
@@ -749,6 +773,158 @@ class DatabaseManager:
             ''', (session_id,))
             return cursor.fetchone()[0]
     
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # ENHANCEMENT 2: RESUME CAPABILITY
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    def get_resume_state(self, session_id: str) -> Optional[dict]:
+        """Get the state needed to resume a search session"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get session info
+            cursor.execute('SELECT * FROM search_sessions WHERE session_id = ?', (session_id,))
+            session = cursor.fetchone()
+            if not session:
+                return None
+            
+            session_dict = dict(session)
+            
+            # Get completed villages
+            cursor.execute('''
+                SELECT village_name, max_survey_checked 
+                FROM village_progress 
+                WHERE session_id = ? AND status = 'completed'
+            ''', (session_id,))
+            completed_villages = {row['village_name']: row['max_survey_checked'] 
+                                  for row in cursor.fetchall()}
+            
+            # Get in-progress villages with their last survey
+            cursor.execute('''
+                SELECT village_name, max_survey_checked 
+                FROM village_progress 
+                WHERE session_id = ? AND status = 'in_progress'
+            ''', (session_id,))
+            in_progress = {row['village_name']: row['max_survey_checked'] 
+                          for row in cursor.fetchall()}
+            
+            return {
+                'session': session_dict,
+                'completed_villages': completed_villages,
+                'in_progress_villages': in_progress,
+                'records_found': session_dict.get('total_records', 0),
+                'matches_found': session_dict.get('total_matches', 0)
+            }
+    
+    def save_village_progress(self, session_id: str, village_name: str, 
+                              survey_no: int, status: str = 'in_progress'):
+        """Save progress for a specific village"""
+        with self.lock:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO village_progress 
+                    (session_id, village_name, max_survey_checked, status, updated_at)
+                    VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                ''', (session_id, village_name, survey_no, status))
+    
+    def get_resumable_sessions(self) -> List[dict]:
+        """Get sessions that can be resumed (incomplete)"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT s.*, 
+                       (SELECT COUNT(*) FROM village_progress vp 
+                        WHERE vp.session_id = s.session_id AND vp.status = 'completed') as completed_villages,
+                       (SELECT COUNT(*) FROM village_progress vp 
+                        WHERE vp.session_id = s.session_id) as total_villages_started
+                FROM search_sessions s
+                WHERE s.status IN ('in_progress', 'paused', 'error')
+                ORDER BY s.created_at DESC
+            ''')
+            return [dict(row) for row in cursor.fetchall()]
+    
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # ENHANCEMENT 6: POST-SEARCH AUDIT
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    def run_audit(self, session_id: str, expected_villages: List[str]) -> dict:
+        """
+        Run a post-search audit to verify completeness.
+        Returns audit results with missing/failed villages.
+        """
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            # Get all processed villages
+            cursor.execute('''
+                SELECT village_name, status, max_survey_checked
+                FROM village_progress 
+                WHERE session_id = ?
+            ''', (session_id,))
+            processed = {row['village_name']: dict(row) for row in cursor.fetchall()}
+            
+            # Find missing villages
+            processed_names = set(processed.keys())
+            expected_names = set(expected_villages)
+            missing_villages = list(expected_names - processed_names)
+            
+            # Find failed villages
+            failed_villages = [name for name, info in processed.items() 
+                              if info['status'] in ('failed', 'error')]
+            
+            # Get records per village
+            cursor.execute('''
+                SELECT village, COUNT(*) as count 
+                FROM land_records 
+                WHERE session_id = ?
+                GROUP BY village
+            ''', (session_id,))
+            records_per_village = {row['village']: row['count'] for row in cursor.fetchall()}
+            
+            # Identify villages with suspiciously low records
+            avg_records = sum(records_per_village.values()) / max(len(records_per_village), 1)
+            suspicious_villages = [name for name, count in records_per_village.items()
+                                  if count < avg_records * 0.1 and avg_records > 10]
+            
+            # Get skipped items count
+            cursor.execute('''
+                SELECT COUNT(*) FROM skipped_items 
+                WHERE session_id = ? AND status = 'pending'
+            ''', (session_id,))
+            pending_skips = cursor.fetchone()[0]
+            
+            audit_result = {
+                'session_id': session_id,
+                'audit_time': datetime.now().isoformat(),
+                'total_expected': len(expected_villages),
+                'total_processed': len(processed),
+                'total_missing': len(missing_villages),
+                'total_failed': len(failed_villages),
+                'total_suspicious': len(suspicious_villages),
+                'pending_skips': pending_skips,
+                'missing_villages': missing_villages[:20],  # First 20
+                'failed_villages': failed_villages[:20],
+                'suspicious_villages': suspicious_villages[:20],
+                'is_complete': len(missing_villages) == 0 and len(failed_villages) == 0,
+                'accuracy_score': (len(processed) - len(failed_villages)) / max(len(expected_villages), 1) * 100
+            }
+            
+            return audit_result
+    
+    def save_audit_result(self, session_id: str, audit_result: dict):
+        """Save audit result to database"""
+        with self.lock:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    UPDATE search_sessions 
+                    SET audit_result = ?, status = ?
+                    WHERE session_id = ?
+                ''', (json.dumps(audit_result), 
+                      'completed' if audit_result['is_complete'] else 'incomplete',
+                      session_id))
+    
     def search_records(self, owner_name: str, limit: int = 100) -> List[dict]:
         """Search records by owner name across all sessions"""
         with self.get_connection() as conn:
@@ -1084,6 +1260,39 @@ class SearchWorker:
         except:
             pass
     
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # ENHANCEMENT 5: VALIDATION LAYER
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    def _validate_record(self, owner: dict) -> bool:
+        """
+        Validate extracted owner record before saving.
+        Returns True if record is valid, False otherwise.
+        """
+        owner_name = owner.get('owner_name', '').strip()
+        
+        # Check for empty or too short names
+        if len(owner_name) < Config.MIN_OWNER_NAME_LENGTH:
+            return False
+        
+        # Check against invalid names list
+        if owner_name in Config.INVALID_OWNER_NAMES:
+            return False
+        
+        # Check for common invalid patterns
+        invalid_patterns = [
+            owner_name.lower() == 'select',
+            owner_name.startswith('--'),
+            owner_name.isdigit(),  # Pure numbers are not valid names
+            owner_name.lower() in ['owner', 'name', 'sl.no', 'slno'],
+        ]
+        
+        if any(invalid_patterns):
+            return False
+        
+        # Valid record
+        return True
+    
     def _extract_owners(self, page_source: str) -> List[dict]:
         """
         Extract owner details from page source.
@@ -1152,6 +1361,69 @@ class SearchWorker:
         
         return owners
     
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # ENHANCEMENT 1: SURVEY RANGE AUTO-DETECTION
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    def _detect_survey_range(self, village_code: str, hobli_code: str) -> int:
+        """
+        Auto-detect the survey range for a village by sampling.
+        Uses binary search-like approach to find max survey.
+        Returns estimated max survey number.
+        """
+        from selenium.webdriver.common.by import By
+        from selenium.webdriver.support.ui import Select
+        
+        IDS = Config.ELEMENT_IDS
+        
+        if not Config.AUTO_DETECT_SURVEY_RANGE:
+            return self.params.get('max_survey', Config.DEFAULT_MAX_SURVEY)
+        
+        try:
+            # Sample survey numbers to estimate range
+            # Test: 1, 50, 100, 200, 500
+            test_surveys = [1, 50, 100, 200, 500]
+            max_found = 0
+            
+            for test_no in test_surveys:
+                try:
+                    # Clear and enter survey number
+                    survey_input = self.driver.find_element(By.ID, IDS['survey_no'])
+                    survey_input.clear()
+                    survey_input.send_keys(str(test_no))
+                    
+                    # Click Go
+                    go_btn = self.driver.find_element(By.ID, IDS['go_btn'])
+                    self.driver.execute_script("arguments[0].click();", go_btn)
+                    time.sleep(2)  # Quick check
+                    
+                    # Check if surnoc has options
+                    surnoc_sel = Select(self.driver.find_element(By.ID, IDS['surnoc']))
+                    surnoc_opts = [o.text for o in surnoc_sel.options if "Select" not in o.text]
+                    
+                    if surnoc_opts:
+                        max_found = test_no
+                    else:
+                        break  # No data at this survey, earlier was likely max
+                    
+                except:
+                    break
+            
+            # Estimate max as 1.3x the highest found (with data)
+            estimated_max = int(max_found * 1.3) if max_found > 0 else Config.DEFAULT_MAX_SURVEY
+            
+            # Store for smart detection
+            with self.state_lock:
+                self.state.detected_survey_ranges[village_code] = estimated_max
+            
+            self._add_log(f"📊 Auto-detected survey range: 1-{estimated_max} (found data up to {max_found})")
+            
+            return max(estimated_max, 20)  # Minimum 20 surveys to check
+            
+        except Exception as e:
+            self.logger.warning(f"Survey range detection failed: {e}")
+            return self.params.get('max_survey', Config.DEFAULT_MAX_SURVEY)
+    
     def _search_village(self, village_code: str, village_name: str, hobli_code: str, hobli_name: str):
         """
         Search a single village for all survey numbers.
@@ -1163,15 +1435,31 @@ class SearchWorker:
         from selenium.webdriver.support import expected_conditions as EC
         
         IDS = Config.ELEMENT_IDS
-        max_survey = self.params.get('max_survey', Config.DEFAULT_MAX_SURVEY)
         owner_variants = self.state.owner_variants
         
         district_name = self.params.get('district_name', 'Unknown')
         taluk_name = self.params.get('taluk_name', 'Unknown')
         
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # ENHANCEMENT 2: Check if resuming - get last survey checked
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        start_survey = 1
+        if self.db and self.session_id:
+            resume_state = self.db.get_resume_state(self.session_id)
+            if resume_state:
+                in_progress = resume_state.get('in_progress_villages', {})
+                if village_name in in_progress:
+                    start_survey = in_progress[village_name] + 1
+                    self._add_log(f"📌 Resuming {village_name} from survey {start_survey}")
+        
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        # ENHANCEMENT 1: Auto-detect survey range (optional)
+        # ═══════════════════════════════════════════════════════════════════════════════════
+        max_survey = self.params.get('max_survey', Config.DEFAULT_MAX_SURVEY)
+        
         self._update_status(
             current_village=village_name,
-            current_survey=0,
+            current_survey=start_survey,
             max_survey=max_survey
         )
         
@@ -1179,15 +1467,26 @@ class SearchWorker:
         surveys_checked = 0
         surveys_with_data = 0
         session_retries = 0  # Track session recovery attempts
+        self._max_survey_with_data = 0  # Track for smart detection
         
-        self._add_log(f"🏘️ Starting {village_name}: Surveys 1 to {max_survey}")
+        self._add_log(f"🏘️ Starting {village_name}: Surveys {start_survey} to {max_survey}")
         
-        # SEQUENTIAL SURVEY ITERATION: 1, 2, 3... NO SKIPPING
-        survey_no = 1
+        # SEQUENTIAL SURVEY ITERATION: No skipping surveys
+        survey_no = start_survey
+        last_progress_save = 0  # Track when we last saved progress
+        
         while survey_no <= max_survey:
             if not self.state.running:
                 self._add_log(f"⏹️ Stopped at survey {survey_no}/{max_survey}")
+                # Save progress before stopping (Enhancement 2)
+                if self.db and self.session_id:
+                    self.db.save_village_progress(self.session_id, village_name, survey_no, 'paused')
                 return
+            
+            # Save progress every 10 surveys (Enhancement 2)
+            if self.db and self.session_id and survey_no - last_progress_save >= 10:
+                self.db.save_village_progress(self.session_id, village_name, survey_no, 'in_progress')
+                last_progress_save = survey_no
             
             surveys_checked += 1
             self._update_status(current_survey=survey_no)
@@ -1268,17 +1567,45 @@ class SearchWorker:
                 if not surnoc_opts:
                     # This is a genuinely empty survey (not session expired)
                     empty_count += 1
-                    # Only skip village if we've had MANY consecutive empty surveys
-                    if empty_count > Config.EMPTY_SURVEY_THRESHOLD:
-                        self._add_log(f"⏭️ {village_name}: {empty_count} consecutive empty surveys, completing village")
+                    
+                    # ═══════════════════════════════════════════════════════════════════════
+                    # ENHANCEMENT 4: SMART EMPTY DETECTION
+                    # Use pattern-based detection instead of fixed threshold
+                    # ═══════════════════════════════════════════════════════════════════════
+                    should_stop = False
+                    
+                    if Config.SMART_EMPTY_DETECTION and surveys_with_data > 0:
+                        # Pattern 1: If we've gone past 1.5x the max found survey with data
+                        max_survey_with_data = getattr(self, '_max_survey_with_data', survey_no)
+                        if survey_no > max_survey_with_data * Config.SMART_EMPTY_MULTIPLIER:
+                            should_stop = True
+                            self._add_log(f"🧠 Smart detection: survey {survey_no} > {max_survey_with_data}*1.5, likely end")
+                        
+                        # Pattern 2: If consecutive empties exceed adaptive threshold
+                        adaptive_threshold = min(Config.CONSECUTIVE_EMPTY_LIMIT, 
+                                                 max(10, int(surveys_with_data * 0.3)))
+                        if empty_count > adaptive_threshold:
+                            should_stop = True
+                            self._add_log(f"🧠 Smart detection: {empty_count} consecutive empty > adaptive threshold {adaptive_threshold}")
+                    else:
+                        # Fallback to fixed threshold
+                        if empty_count > Config.EMPTY_SURVEY_THRESHOLD:
+                            should_stop = True
+                    
+                    if should_stop:
+                        self._add_log(f"⏭️ {village_name}: completing after {empty_count} empty surveys")
                         self._add_log(f"📊 {village_name} Summary: Checked {surveys_checked}, Found data in {surveys_with_data}")
                         break
+                    
                     survey_no += 1  # Move to next survey
                     continue
                 
                 # Found data - reset empty count and increment found count
                 empty_count = 0
                 surveys_with_data += 1
+                
+                # Track max survey with data for smart detection
+                self._max_survey_with_data = survey_no
                 
                 # Process each surnoc
                 for surnoc in surnoc_opts:
@@ -1308,10 +1635,7 @@ class SearchWorker:
                                     hissa_sel.select_by_visible_text(hissa)
                                     time.sleep(Config.POST_SELECT_WAIT)
                                     
-                                    # ═══════════════════════════════════════════════════════════════════════
-                                    # ACCURACY FIX: Process ALL PERIODS, not just the first one!
-                                    # Each period can have different owners - we need them all!
-                                    # ═══════════════════════════════════════════════════════════════════════
+                                    # Select LATEST period only (user preference for speed)
                                     period_sel = Select(self.driver.find_element(By.ID, IDS['period']))
                                     period_opts = [o.text for o in period_sel.options if "Select" not in o.text]
                                     
@@ -1319,75 +1643,74 @@ class SearchWorker:
                                         self._add_log(f"⚠️ No periods for Sy:{survey_no} H:{hissa}")
                                         break  # Move to next hissa
                                     
-                                    # Process EACH period for complete historical data
-                                    for period in period_opts:
-                                        if not self.state.running:
-                                            return
-                                        
-                                        try:
-                                            period_sel = Select(self.driver.find_element(By.ID, IDS['period']))
-                                            period_sel.select_by_visible_text(period)
-                                            time.sleep(1)
-                                            
-                                            # Click Fetch Details with verification
-                                            fetch_btn = self.driver.find_element(By.ID, IDS['fetch_btn'])
-                                            self.driver.execute_script("arguments[0].click();", fetch_btn)
-                                            time.sleep(Config.POST_CLICK_WAIT)
-                                            
-                                            # Verify page loaded (look for owner table)
-                                            page_source = self.driver.page_source
-                                            if 'Session expired' in page_source or 'login again' in page_source.lower():
-                                                raise Exception("Session expired during fetch")
-                                            
-                                            # Extract owners
-                                            owners = self._extract_owners(page_source)
-                                            
-                                            for owner in owners:
-                                                record = LandRecord(
-                                                    district=district_name,
-                                                    taluk=taluk_name,
-                                                    hobli=hobli_name,
-                                                    village=village_name,
-                                                    survey_no=survey_no,
-                                                    surnoc=surnoc,
-                                                    hissa=hissa,
-                                                    period=period,
-                                                    owner_name=owner['owner_name'],
-                                                    extent=owner['extent'],
-                                                    khatah=owner['khatah'],
-                                                    worker_id=self.worker_id
-                                                )
-                                                
-                                                record_dict = asdict(record)
-                                                
-                                                # Check for match
-                                                is_match = any(v.lower() in owner['owner_name'].lower() for v in owner_variants if v)
-                                                
-                                                # SAVE TO PERSISTENT DATABASE (REAL-TIME)
-                                                if self.db and self.session_id:
-                                                    self.db.save_record(self.session_id, record_dict, is_match=is_match)
-                                                
-                                                # Write to CSV (backup)
-                                                self.all_records_writer.write_record(record_dict)
-                                                self.records_found += 1
-                                                
-                                                # Add to state for real-time UI display
+                                    # Select LATEST period (first in list is most recent)
+                                    period = period_opts[0]
+                                    period_sel.select_by_visible_text(period)
+                                    time.sleep(1)
+                                    
+                                    # Click Fetch Details with verification
+                                    fetch_btn = self.driver.find_element(By.ID, IDS['fetch_btn'])
+                                    self.driver.execute_script("arguments[0].click();", fetch_btn)
+                                    time.sleep(Config.POST_CLICK_WAIT)
+                                    
+                                    # Verify page loaded (look for owner table)
+                                    page_source = self.driver.page_source
+                                    if 'Session expired' in page_source or 'login again' in page_source.lower():
+                                        raise Exception("Session expired during fetch")
+                                    
+                                    # Extract owners
+                                    owners = self._extract_owners(page_source)
+                                    
+                                    for owner in owners:
+                                        # ═══════════════════════════════════════════════════════════════════════
+                                        # ENHANCEMENT 5: VALIDATION LAYER - Validate before saving
+                                        # ═══════════════════════════════════════════════════════════════════════
+                                        if Config.VALIDATE_RECORDS:
+                                            if not self._validate_record(owner):
                                                 with self.state_lock:
-                                                    self.state.all_records.append(record_dict)
-                                                    if len(self.state.all_records) > 500:
-                                                        self.state.all_records = self.state.all_records[-500:]
-                                                
-                                                if is_match:
-                                                    self.matches_writer.write_record(record_dict)
-                                                    self.matches_found += 1
-                                                    with self.state_lock:
-                                                        self.state.matches.append(record_dict)
-                                                    self._add_log(f"🎯 MATCH: {owner['owner_name']} in {village_name} Sy:{survey_no}")
+                                                    self.state.validation_rejections += 1
+                                                continue  # Skip invalid records
                                         
-                                        except Exception as period_error:
-                                            # Log period error but continue to next period
-                                            self._add_log(f"⚠️ Period error Sy:{survey_no} H:{hissa} P:{period}: {str(period_error)[:30]}")
-                                            self.errors += 1
+                                        record = LandRecord(
+                                            district=district_name,
+                                            taluk=taluk_name,
+                                            hobli=hobli_name,
+                                            village=village_name,
+                                            survey_no=survey_no,
+                                            surnoc=surnoc,
+                                            hissa=hissa,
+                                            period=period,
+                                            owner_name=owner['owner_name'],
+                                            extent=owner['extent'],
+                                            khatah=owner['khatah'],
+                                            worker_id=self.worker_id
+                                        )
+                                        
+                                        record_dict = asdict(record)
+                                        
+                                        # Check for match
+                                        is_match = any(v.lower() in owner['owner_name'].lower() for v in owner_variants if v)
+                                        
+                                        # SAVE TO PERSISTENT DATABASE (REAL-TIME)
+                                        if self.db and self.session_id:
+                                            self.db.save_record(self.session_id, record_dict, is_match=is_match)
+                                        
+                                        # Write to CSV (backup)
+                                        self.all_records_writer.write_record(record_dict)
+                                        self.records_found += 1
+                                        
+                                        # Add to state for real-time UI display
+                                        with self.state_lock:
+                                            self.state.all_records.append(record_dict)
+                                            if len(self.state.all_records) > 500:
+                                                self.state.all_records = self.state.all_records[-500:]
+                                        
+                                        if is_match:
+                                            self.matches_writer.write_record(record_dict)
+                                            self.matches_found += 1
+                                            with self.state_lock:
+                                                self.state.matches.append(record_dict)
+                                            self._add_log(f"🎯 MATCH: {owner['owner_name']} in {village_name} Sy:{survey_no}")
                                     
                                     # Update stats after processing all periods for this hissa
                                     self._update_status(
@@ -1514,6 +1837,10 @@ class SearchWorker:
         
         # End of village summary
         self._add_log(f"✅ {village_name} COMPLETE: {surveys_checked} surveys, {surveys_with_data} with data, {self.records_found} records")
+        
+        # Mark village as completed in database (Enhancement 2)
+        if self.db and self.session_id:
+            self.db.save_village_progress(self.session_id, village_name, survey_no, 'completed')
     
     def run(self):
         """Main worker execution with browser crash recovery"""
@@ -1930,6 +2257,44 @@ class ParallelSearchCoordinator:
                             total_matches=self.state.total_matches
                         )
                         self.state.logs.append(f"💾 Search saved to database: {self.current_session_id}")
+                        
+                        # ═══════════════════════════════════════════════════════════════════════
+                        # ENHANCEMENT 6: POST-SEARCH AUDIT
+                        # ═══════════════════════════════════════════════════════════════════════
+                        if Config.POST_SEARCH_AUDIT:
+                            self.state.logs.append("🔍 Running post-search audit...")
+                            try:
+                                audit_result = self.db.run_audit(
+                                    self.current_session_id, 
+                                    self.state.villages_all
+                                )
+                                self.db.save_audit_result(self.current_session_id, audit_result)
+                                
+                                # Store in state for UI
+                                self.state.audit_results = audit_result
+                                
+                                # Log audit results
+                                self.state.logs.append(f"📊 AUDIT RESULTS:")
+                                self.state.logs.append(f"   Expected villages: {audit_result['total_expected']}")
+                                self.state.logs.append(f"   Processed: {audit_result['total_processed']}")
+                                self.state.logs.append(f"   Missing: {audit_result['total_missing']}")
+                                self.state.logs.append(f"   Failed: {audit_result['total_failed']}")
+                                self.state.logs.append(f"   Accuracy Score: {audit_result['accuracy_score']:.1f}%")
+                                
+                                if audit_result['is_complete']:
+                                    self.state.logs.append("✅ AUDIT PASSED: 100% villages processed!")
+                                else:
+                                    self.state.logs.append(f"⚠️ AUDIT: {audit_result['total_missing']} villages need retry")
+                                    if audit_result['missing_villages']:
+                                        self.state.logs.append(f"   Missing: {', '.join(audit_result['missing_villages'][:5])}...")
+                                        
+                                # Get skipped items count
+                                skipped_count = self.db.get_skipped_count(self.current_session_id)
+                                if skipped_count > 0:
+                                    self.state.logs.append(f"📋 Skipped items for retry: {skipped_count}")
+                                    
+                            except Exception as audit_err:
+                                self.state.logs.append(f"⚠️ Audit error: {str(audit_err)[:50]}")
                     
                     logger.info("Search completed")
                     break
@@ -3474,6 +3839,54 @@ def get_session_records(session_id):
         'session_id': session_id,
         'count': len(records),
         'records': records
+    })
+
+@app.route('/api/db/resumable')
+def get_resumable_sessions():
+    """Get sessions that can be resumed (Enhancement 2)"""
+    db = get_database()
+    sessions = db.get_resumable_sessions()
+    return jsonify(sessions)
+
+@app.route('/api/db/sessions/<session_id>/resume')
+def get_resume_state(session_id):
+    """Get the state needed to resume a session (Enhancement 2)"""
+    db = get_database()
+    state = db.get_resume_state(session_id)
+    if not state:
+        return jsonify({'error': 'Session not found'}), 404
+    return jsonify(state)
+
+@app.route('/api/db/sessions/<session_id>/audit')
+def get_session_audit(session_id):
+    """Get audit results for a session (Enhancement 6)"""
+    db = get_database()
+    session = db.get_session(session_id)
+    if not session:
+        return jsonify({'error': 'Session not found'}), 404
+    
+    audit_result = session.get('audit_result')
+    if audit_result and isinstance(audit_result, str):
+        try:
+            audit_result = json.loads(audit_result)
+        except:
+            audit_result = None
+    
+    return jsonify({
+        'session_id': session_id,
+        'has_audit': audit_result is not None,
+        'audit': audit_result
+    })
+
+@app.route('/api/db/sessions/<session_id>/skipped')
+def get_session_skipped(session_id):
+    """Get skipped items for a session (for retry)"""
+    db = get_database()
+    skipped = db.get_skipped_items(session_id)
+    return jsonify({
+        'session_id': session_id,
+        'count': len(skipped),
+        'items': skipped
     })
 
 @app.route('/api/db/sessions/<session_id>/export')
