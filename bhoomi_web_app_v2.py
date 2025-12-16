@@ -69,8 +69,12 @@ class Config:
     EMPTY_SURVEY_THRESHOLD = 100  # High threshold to avoid premature skipping
     
     # Session Recovery Settings
-    MAX_SESSION_RETRIES = 5  # Retry this many times on session expiry
+    MAX_SESSION_RETRIES = 3  # Retry this many times on session expiry
     SESSION_REFRESH_WAIT = 3  # Wait after refreshing session
+    
+    # Browser Stability Settings
+    MAX_HISSA_BEFORE_RESTART = 200  # Restart browser after processing this many Hissa to prevent memory issues
+    BROWSER_RESTART_DELAY = 3  # Seconds to wait before restarting browser
     
     # URLs
     ECHAWADI_BASE = "https://rdservices.karnataka.gov.in/echawadi/Home"
@@ -491,25 +495,22 @@ class SearchWorker:
         """
         Refresh the session by navigating back to the portal.
         Returns True if session refresh succeeded, False otherwise.
+        Raises exception if browser is dead (invalid session id).
         """
-        try:
-            self._add_log(f"🔄 Refreshing session...")
-            
-            # Navigate to a fresh page to get a new session
-            self.driver.delete_all_cookies()
-            self.driver.get(Config.SERVICE2_URL)
-            time.sleep(Config.SESSION_REFRESH_WAIT)
-            
-            # Verify session is good
-            if not self._is_session_expired():
-                self._add_log(f"✅ Session refreshed successfully")
-                return True
-            else:
-                self._add_log(f"⚠️ Session still expired after refresh")
-                return False
-                
-        except Exception as e:
-            self._add_log(f"❌ Session refresh failed: {str(e)[:50]}")
+        self._add_log(f"🔄 Refreshing session...")
+        
+        # This will raise an exception if browser is dead
+        # Let the caller handle browser restart
+        self.driver.delete_all_cookies()
+        self.driver.get(Config.SERVICE2_URL)
+        time.sleep(Config.SESSION_REFRESH_WAIT)
+        
+        # Verify session is good
+        if not self._is_session_expired():
+            self._add_log(f"✅ Session refreshed successfully")
+            return True
+        else:
+            self._add_log(f"⚠️ Session still expired after refresh")
             return False
         try:
             if os.path.exists(user_data_dir):
@@ -793,22 +794,75 @@ class SearchWorker:
             except Exception as e:
                 error_str = str(e).lower()
                 
-                # Check if it's a session expiry we should retry
-                if 'session' in error_str or 'expired' in error_str:
-                    self._add_log(f"⚠️ Session error at survey {survey_no}: {str(e)[:50]}")
+                # ═══════════════════════════════════════════════════════════════════════
+                # CRITICAL: Detect browser death (invalid session id) vs session expiry
+                # ═══════════════════════════════════════════════════════════════════════
+                if 'invalid session id' in error_str or 'no such session' in error_str:
+                    # Browser is DEAD - must restart it completely
+                    self._add_log(f"💀 BROWSER DIED at survey {survey_no}! Restarting...")
+                    browser_restart_attempts = 0
+                    max_restart_attempts = 3
+                    
+                    while browser_restart_attempts < max_restart_attempts:
+                        try:
+                            self._close_browser()
+                            time.sleep(2)
+                            self._init_browser()
+                            self._add_log(f"✅ Browser restarted! Retrying survey {survey_no}")
+                            session_retries = 0  # Reset session retries
+                            break  # Successfully restarted
+                        except Exception as restart_err:
+                            browser_restart_attempts += 1
+                            self._add_log(f"❌ Browser restart attempt {browser_restart_attempts} failed: {str(restart_err)[:30]}")
+                            time.sleep(3)
+                    
+                    if browser_restart_attempts >= max_restart_attempts:
+                        self._add_log(f"❌ Could not restart browser after {max_restart_attempts} attempts. Stopping village.")
+                        break  # Exit village loop - browser is dead
+                    
+                    continue  # RETRY same survey with new browser
+                
+                elif 'session' in error_str or 'expired' in error_str:
+                    # Session expired but browser may be alive - try refresh first
+                    self._add_log(f"⚠️ Session expired at survey {survey_no}")
                     if session_retries < Config.MAX_SESSION_RETRIES:
                         session_retries += 1
-                        self._refresh_session()
-                        continue  # RETRY same survey, don't increment!
+                        try:
+                            self._refresh_session()
+                            continue  # RETRY same survey
+                        except:
+                            # Refresh failed - browser might be dead, restart it
+                            self._add_log(f"🔄 Session refresh failed, restarting browser...")
+                            self._close_browser()
+                            time.sleep(2)
+                            try:
+                                self._init_browser()
+                                continue  # RETRY same survey with new browser
+                            except:
+                                self._add_log(f"❌ Browser restart failed!")
+                                break  # Exit village loop
+                    else:
+                        # Max retries reached - try browser restart as last resort
+                        self._add_log(f"⚠️ Max session retries reached, restarting browser...")
+                        self._close_browser()
+                        time.sleep(2)
+                        try:
+                            self._init_browser()
+                            session_retries = 0
+                            continue  # RETRY with fresh browser
+                        except:
+                            self._add_log(f"❌ Browser restart failed after max retries!")
+                            break
                 
-                # Other error - log and continue to next survey
-                self.errors += 1
-                empty_count += 1
-                survey_no += 1  # Move to next survey
-                
-                if empty_count > Config.EMPTY_SURVEY_THRESHOLD:
-                    self._add_log(f"📊 {village_name} complete after {surveys_checked} surveys, {surveys_with_data} with data")
-                    break
+                else:
+                    # Other error - log and continue to next survey
+                    self.errors += 1
+                    empty_count += 1
+                    survey_no += 1  # Move to next survey
+                    
+                    if empty_count > Config.EMPTY_SURVEY_THRESHOLD:
+                        self._add_log(f"📊 {village_name} complete after {surveys_checked} surveys, {surveys_with_data} with data")
+                        break
         
         # End of village summary
         self._add_log(f"✅ {village_name} COMPLETE: {surveys_checked} surveys, {surveys_with_data} with data, {self.records_found} records")
