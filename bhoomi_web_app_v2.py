@@ -1234,6 +1234,11 @@ class BhoomiAPI:
         })
         self._cache = {}
     
+    def clear_cache(self):
+        """Clear the API cache"""
+        self._cache = {}
+        logger.info("API cache cleared")
+    
     def _make_request(self, endpoint: str, data: dict = None, method: str = 'POST') -> Optional[dict]:
         """Make API request with error handling"""
         url = f"{Config.ECHAWADI_BASE}/{endpoint}"
@@ -1330,6 +1335,10 @@ class MasterDatabaseSyncer:
             self.sync_id = self.db.start_master_sync()
             self._log("🚀 Starting Master Database Sync...")
             
+            # Clear API cache to ensure fresh data
+            self.api.clear_cache()
+            self._log("🧹 Cleared API cache")
+            
             # Get all districts
             districts = self.api.get_districts()
             self._log(f"📍 Found {len(districts)} districts")
@@ -1338,8 +1347,10 @@ class MasterDatabaseSyncer:
                 if not self.is_syncing:
                     break
                     
-                district_code = district.get('district_code')
-                district_name = district.get('district_name_en', district.get('district_name', ''))
+                # API returns floats (1.0, 2.0) - convert to int
+                district_code = int(district.get('district_code', 0))
+                # Use Kannada name since that's what API returns
+                district_name = district.get('district_name_kn', district.get('district_name_en', district.get('district_name', f'District {district_code}')))
                 
                 # Save district
                 self.db.save_master_district(district)
@@ -1352,9 +1363,10 @@ class MasterDatabaseSyncer:
                 for taluk in taluks:
                     if not self.is_syncing:
                         break
-                        
-                    taluk_code = taluk.get('taluka_code')
-                    taluk_name = taluk.get('taluka_name_en', taluk.get('taluka_name', ''))
+                    
+                    # API returns floats - convert to int
+                    taluk_code = int(taluk.get('taluka_code', 0))
+                    taluk_name = taluk.get('taluka_name_kn', taluk.get('taluka_name_en', taluk.get('taluka_name', f'Taluk {taluk_code}')))
                     
                     # Save taluk
                     self.db.save_master_taluk(district_code, taluk)
@@ -1366,9 +1378,10 @@ class MasterDatabaseSyncer:
                     for hobli in hoblis:
                         if not self.is_syncing:
                             break
-                            
-                        hobli_code = hobli.get('hobli_code')
-                        hobli_name = hobli.get('hobli_name_en', hobli.get('hobli_name', ''))
+                        
+                        # API returns floats - convert to int
+                        hobli_code = int(hobli.get('hobli_code', 0))
+                        hobli_name = hobli.get('hobli_name_kn', hobli.get('hobli_name_en', hobli.get('hobli_name', f'Hobli {hobli_code}')))
                         
                         # Save hobli
                         self.db.save_master_hobli(district_code, taluk_code, hobli)
