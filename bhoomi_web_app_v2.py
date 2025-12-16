@@ -14,7 +14,7 @@
 ║  • Robust error recovery with detailed logging                                       ║
 ╚══════════════════════════════════════════════════════════════════════════════════════╝
 
-Version: 3.4.0-100Percent
+Version: 3.5.0-MasterDB
 Author: POWER-BHOOMI Team
 """
 
@@ -373,6 +373,79 @@ class DatabaseManager:
                         FOREIGN KEY (session_id) REFERENCES search_sessions(session_id)
                     )
                 ''')
+                
+                # ═══════════════════════════════════════════════════════════════════════
+                # MASTER LOCATION DATABASE - Pre-indexed for 100% accuracy
+                # ═══════════════════════════════════════════════════════════════════════
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS master_districts (
+                        district_code INTEGER PRIMARY KEY,
+                        district_name TEXT,
+                        district_name_kn TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS master_taluks (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        district_code INTEGER,
+                        taluk_code INTEGER,
+                        taluk_name TEXT,
+                        taluk_name_kn TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(district_code, taluk_code)
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS master_hoblis (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        district_code INTEGER,
+                        taluk_code INTEGER,
+                        hobli_code INTEGER,
+                        hobli_name TEXT,
+                        hobli_name_kn TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(district_code, taluk_code, hobli_code)
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS master_villages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        district_code INTEGER,
+                        district_name TEXT,
+                        taluk_code INTEGER,
+                        taluk_name TEXT,
+                        hobli_code INTEGER,
+                        hobli_name TEXT,
+                        village_code INTEGER,
+                        village_name TEXT,
+                        village_name_kn TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        UNIQUE(district_code, taluk_code, hobli_code, village_code)
+                    )
+                ''')
+                
+                cursor.execute('''
+                    CREATE TABLE IF NOT EXISTS master_sync_log (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        sync_type TEXT,  -- full, partial
+                        districts_synced INTEGER DEFAULT 0,
+                        taluks_synced INTEGER DEFAULT 0,
+                        hoblis_synced INTEGER DEFAULT 0,
+                        villages_synced INTEGER DEFAULT 0,
+                        status TEXT DEFAULT 'in_progress',
+                        started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        completed_at TIMESTAMP
+                    )
+                ''')
+                
+                # Create indexes for master tables
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_master_taluks_dist ON master_taluks(district_code)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_master_hoblis_dist_taluk ON master_hoblis(district_code, taluk_code)')
+                cursor.execute('CREATE INDEX IF NOT EXISTS idx_master_villages_full ON master_villages(district_code, taluk_code, hobli_code)')
                 
                 # Village Progress Table - Track which villages/surveys are done
                 cursor.execute('''
@@ -925,6 +998,200 @@ class DatabaseManager:
                       'completed' if audit_result['is_complete'] else 'incomplete',
                       session_id))
     
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    # MASTER LOCATION DATABASE - Build & Query
+    # ═══════════════════════════════════════════════════════════════════════════════════
+    
+    def get_master_stats(self) -> dict:
+        """Get statistics of the master location database"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            cursor.execute('SELECT COUNT(*) FROM master_districts')
+            districts = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM master_taluks')
+            taluks = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM master_hoblis')
+            hoblis = cursor.fetchone()[0]
+            
+            cursor.execute('SELECT COUNT(*) FROM master_villages')
+            villages = cursor.fetchone()[0]
+            
+            # Get last sync info
+            cursor.execute('''
+                SELECT * FROM master_sync_log 
+                ORDER BY id DESC LIMIT 1
+            ''')
+            last_sync = cursor.fetchone()
+            
+            return {
+                'districts': districts,
+                'taluks': taluks,
+                'hoblis': hoblis,
+                'villages': villages,
+                'total_locations': districts + taluks + hoblis + villages,
+                'is_synced': villages > 0,
+                'last_sync': dict(last_sync) if last_sync else None
+            }
+    
+    def save_master_district(self, district: dict):
+        """Save a district to master database"""
+        with self.lock:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO master_districts 
+                    (district_code, district_name, district_name_kn)
+                    VALUES (?, ?, ?)
+                ''', (
+                    district.get('district_code'),
+                    district.get('district_name_en', district.get('district_name', '')),
+                    district.get('district_name_kn', '')
+                ))
+    
+    def save_master_taluk(self, district_code: int, taluk: dict):
+        """Save a taluk to master database"""
+        with self.lock:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO master_taluks 
+                    (district_code, taluk_code, taluk_name, taluk_name_kn)
+                    VALUES (?, ?, ?, ?)
+                ''', (
+                    district_code,
+                    taluk.get('taluka_code'),
+                    taluk.get('taluka_name_en', taluk.get('taluka_name', '')),
+                    taluk.get('taluka_name_kn', '')
+                ))
+    
+    def save_master_hobli(self, district_code: int, taluk_code: int, hobli: dict):
+        """Save a hobli to master database"""
+        with self.lock:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO master_hoblis 
+                    (district_code, taluk_code, hobli_code, hobli_name, hobli_name_kn)
+                    VALUES (?, ?, ?, ?, ?)
+                ''', (
+                    district_code,
+                    taluk_code,
+                    hobli.get('hobli_code'),
+                    hobli.get('hobli_name_en', hobli.get('hobli_name', '')),
+                    hobli.get('hobli_name_kn', '')
+                ))
+    
+    def save_master_village(self, district_code: int, district_name: str,
+                           taluk_code: int, taluk_name: str,
+                           hobli_code: int, hobli_name: str, village: dict):
+        """Save a village to master database"""
+        with self.lock:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT OR REPLACE INTO master_villages 
+                    (district_code, district_name, taluk_code, taluk_name,
+                     hobli_code, hobli_name, village_code, village_name, village_name_kn)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''', (
+                    district_code, district_name,
+                    taluk_code, taluk_name,
+                    hobli_code, hobli_name,
+                    village.get('village_code'),
+                    village.get('village_name_en', village.get('village_name', '')),
+                    village.get('village_name_kn', '')
+                ))
+    
+    def start_master_sync(self) -> int:
+        """Start a new sync log entry, returns sync_id"""
+        with self.lock:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                cursor.execute('''
+                    INSERT INTO master_sync_log (sync_type, status)
+                    VALUES ('full', 'in_progress')
+                ''')
+                return cursor.lastrowid
+    
+    def update_master_sync(self, sync_id: int, districts: int = 0, taluks: int = 0,
+                          hoblis: int = 0, villages: int = 0, status: str = 'in_progress'):
+        """Update sync progress"""
+        with self.lock:
+            with self.get_connection() as conn:
+                cursor = conn.cursor()
+                completed_at = datetime.now().isoformat() if status == 'completed' else None
+                cursor.execute('''
+                    UPDATE master_sync_log 
+                    SET districts_synced = ?, taluks_synced = ?, hoblis_synced = ?, 
+                        villages_synced = ?, status = ?, completed_at = ?
+                    WHERE id = ?
+                ''', (districts, taluks, hoblis, villages, status, completed_at, sync_id))
+    
+    def get_master_villages_for_search(self, district_code: int = None, taluk_code: int = None,
+                                       hobli_code: int = None) -> List[dict]:
+        """Get villages from master database for search"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            
+            query = 'SELECT * FROM master_villages WHERE 1=1'
+            params = []
+            
+            if district_code:
+                query += ' AND district_code = ?'
+                params.append(district_code)
+            if taluk_code:
+                query += ' AND taluk_code = ?'
+                params.append(taluk_code)
+            if hobli_code:
+                query += ' AND hobli_code = ?'
+                params.append(hobli_code)
+            
+            query += ' ORDER BY district_name, taluk_name, hobli_name, village_name'
+            
+            cursor.execute(query, params)
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_master_districts(self) -> List[dict]:
+        """Get all districts from master database"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('SELECT * FROM master_districts ORDER BY district_name')
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_master_taluks(self, district_code: int) -> List[dict]:
+        """Get all taluks for a district from master database"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM master_taluks 
+                WHERE district_code = ? ORDER BY taluk_name
+            ''', (district_code,))
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_master_hoblis(self, district_code: int, taluk_code: int) -> List[dict]:
+        """Get all hoblis from master database"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM master_hoblis 
+                WHERE district_code = ? AND taluk_code = ? ORDER BY hobli_name
+            ''', (district_code, taluk_code))
+            return [dict(row) for row in cursor.fetchall()]
+    
+    def get_master_villages(self, district_code: int, taluk_code: int, hobli_code: int) -> List[dict]:
+        """Get all villages from master database"""
+        with self.get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute('''
+                SELECT * FROM master_villages 
+                WHERE district_code = ? AND taluk_code = ? AND hobli_code = ?
+                ORDER BY village_name
+            ''', (district_code, taluk_code, hobli_code))
+            return [dict(row) for row in cursor.fetchall()]
+    
     def search_records(self, owner_name: str, limit: int = 100) -> List[dict]:
         """Search records by owner name across all sessions"""
         with self.get_connection() as conn:
@@ -1027,6 +1294,170 @@ class BhoomiAPI:
         if result and 'data' in result:
             return sorted(result['data'], key=lambda x: x.get('village_name_kn', ''))
         return []
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# MASTER DATABASE SYNCER - Pre-index ALL locations for 100% accuracy
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+class MasterDatabaseSyncer:
+    """
+    Syncs ALL Districts → Taluks → Hoblis → Villages to local database.
+    This ensures we know EXACTLY what exists before searching.
+    """
+    
+    def __init__(self, db: DatabaseManager, api: 'BhoomiAPI'):
+        self.db = db
+        self.api = api
+        self.logger = logging.getLogger('MasterSync')
+        self.sync_id = None
+        self.stats = {'districts': 0, 'taluks': 0, 'hoblis': 0, 'villages': 0}
+        self.is_syncing = False
+        self.sync_progress = []
+    
+    def sync_all(self, progress_callback=None) -> dict:
+        """
+        Sync entire Karnataka location hierarchy.
+        Returns statistics of synced data.
+        """
+        if self.is_syncing:
+            return {'error': 'Sync already in progress'}
+        
+        self.is_syncing = True
+        self.sync_progress = []
+        self.stats = {'districts': 0, 'taluks': 0, 'hoblis': 0, 'villages': 0}
+        
+        try:
+            self.sync_id = self.db.start_master_sync()
+            self._log("🚀 Starting Master Database Sync...")
+            
+            # Get all districts
+            districts = self.api.get_districts()
+            self._log(f"📍 Found {len(districts)} districts")
+            
+            for district in districts:
+                if not self.is_syncing:
+                    break
+                    
+                district_code = district.get('district_code')
+                district_name = district.get('district_name_en', district.get('district_name', ''))
+                
+                # Save district
+                self.db.save_master_district(district)
+                self.stats['districts'] += 1
+                
+                # Get taluks for this district
+                taluks = self.api.get_taluks(district_code)
+                self._log(f"  📍 {district_name}: {len(taluks)} taluks")
+                
+                for taluk in taluks:
+                    if not self.is_syncing:
+                        break
+                        
+                    taluk_code = taluk.get('taluka_code')
+                    taluk_name = taluk.get('taluka_name_en', taluk.get('taluka_name', ''))
+                    
+                    # Save taluk
+                    self.db.save_master_taluk(district_code, taluk)
+                    self.stats['taluks'] += 1
+                    
+                    # Get hoblis for this taluk
+                    hoblis = self.api.get_hoblis(district_code, taluk_code)
+                    
+                    for hobli in hoblis:
+                        if not self.is_syncing:
+                            break
+                            
+                        hobli_code = hobli.get('hobli_code')
+                        hobli_name = hobli.get('hobli_name_en', hobli.get('hobli_name', ''))
+                        
+                        # Save hobli
+                        self.db.save_master_hobli(district_code, taluk_code, hobli)
+                        self.stats['hoblis'] += 1
+                        
+                        # Get villages for this hobli
+                        villages = self.api.get_villages(district_code, taluk_code, hobli_code)
+                        
+                        for village in villages:
+                            # Save village with full hierarchy
+                            self.db.save_master_village(
+                                district_code, district_name,
+                                taluk_code, taluk_name,
+                                hobli_code, hobli_name,
+                                village
+                            )
+                            self.stats['villages'] += 1
+                        
+                        # Update sync progress periodically
+                        if self.stats['villages'] % 100 == 0:
+                            self.db.update_master_sync(
+                                self.sync_id,
+                                self.stats['districts'],
+                                self.stats['taluks'],
+                                self.stats['hoblis'],
+                                self.stats['villages']
+                            )
+                            self._log(f"    ✓ Synced {self.stats['villages']} villages...")
+                
+                # Log district completion
+                self._log(f"  ✅ {district_name} complete")
+            
+            # Mark sync as complete
+            self.db.update_master_sync(
+                self.sync_id,
+                self.stats['districts'],
+                self.stats['taluks'],
+                self.stats['hoblis'],
+                self.stats['villages'],
+                'completed'
+            )
+            
+            self._log(f"✅ SYNC COMPLETE!")
+            self._log(f"   Districts: {self.stats['districts']}")
+            self._log(f"   Taluks: {self.stats['taluks']}")
+            self._log(f"   Hoblis: {self.stats['hoblis']}")
+            self._log(f"   Villages: {self.stats['villages']}")
+            
+            return self.stats
+            
+        except Exception as e:
+            self._log(f"❌ Sync error: {str(e)}")
+            if self.sync_id:
+                self.db.update_master_sync(self.sync_id, status='failed')
+            return {'error': str(e)}
+        finally:
+            self.is_syncing = False
+    
+    def stop_sync(self):
+        """Stop ongoing sync"""
+        self.is_syncing = False
+        self._log("⏹️ Sync stopped by user")
+    
+    def _log(self, message: str):
+        """Log sync progress"""
+        timestamp = datetime.now().strftime('%H:%M:%S')
+        log_entry = f"{timestamp} - {message}"
+        self.sync_progress.append(log_entry)
+        self.logger.info(message)
+    
+    def get_sync_status(self) -> dict:
+        """Get current sync status"""
+        return {
+            'is_syncing': self.is_syncing,
+            'stats': self.stats,
+            'progress': self.sync_progress[-50:] if self.sync_progress else []
+        }
+
+
+# Global syncer instance
+master_syncer = None
+
+def get_master_syncer():
+    """Get or create master syncer"""
+    global master_syncer
+    if master_syncer is None:
+        master_syncer = MasterDatabaseSyncer(get_database(), api)
+    return master_syncer
+
 
 # ═══════════════════════════════════════════════════════════════════════════════════════
 # SEARCH WORKER
@@ -3847,6 +4278,94 @@ def get_resumable_sessions():
     db = get_database()
     sessions = db.get_resumable_sessions()
     return jsonify(sessions)
+
+# ═══════════════════════════════════════════════════════════════════════════════════════
+# MASTER DATABASE API ENDPOINTS
+# ═══════════════════════════════════════════════════════════════════════════════════════
+
+@app.route('/api/master/stats')
+def get_master_stats():
+    """Get master database statistics"""
+    db = get_database()
+    stats = db.get_master_stats()
+    return jsonify(stats)
+
+@app.route('/api/master/sync/start', methods=['POST'])
+def start_master_sync():
+    """Start syncing master location database"""
+    syncer = get_master_syncer()
+    
+    if syncer.is_syncing:
+        return jsonify({'error': 'Sync already in progress', 'status': syncer.get_sync_status()})
+    
+    # Run sync in background thread
+    import threading
+    def run_sync():
+        syncer.sync_all()
+    
+    thread = threading.Thread(target=run_sync, daemon=True)
+    thread.start()
+    
+    return jsonify({'message': 'Sync started', 'status': syncer.get_sync_status()})
+
+@app.route('/api/master/sync/stop', methods=['POST'])
+def stop_master_sync():
+    """Stop ongoing master sync"""
+    syncer = get_master_syncer()
+    syncer.stop_sync()
+    return jsonify({'message': 'Sync stopped', 'status': syncer.get_sync_status()})
+
+@app.route('/api/master/sync/status')
+def get_master_sync_status():
+    """Get current sync status"""
+    syncer = get_master_syncer()
+    return jsonify(syncer.get_sync_status())
+
+@app.route('/api/master/districts')
+def get_master_districts():
+    """Get all districts from master database"""
+    db = get_database()
+    districts = db.get_master_districts()
+    return jsonify(districts)
+
+@app.route('/api/master/taluks/<int:district_code>')
+def get_master_taluks(district_code):
+    """Get all taluks for a district from master database"""
+    db = get_database()
+    taluks = db.get_master_taluks(district_code)
+    return jsonify(taluks)
+
+@app.route('/api/master/hoblis/<int:district_code>/<int:taluk_code>')
+def get_master_hoblis(district_code, taluk_code):
+    """Get all hoblis from master database"""
+    db = get_database()
+    hoblis = db.get_master_hoblis(district_code, taluk_code)
+    return jsonify(hoblis)
+
+@app.route('/api/master/villages/<int:district_code>/<int:taluk_code>/<int:hobli_code>')
+def get_master_villages_api(district_code, taluk_code, hobli_code):
+    """Get all villages from master database"""
+    db = get_database()
+    villages = db.get_master_villages(district_code, taluk_code, hobli_code)
+    return jsonify(villages)
+
+@app.route('/api/master/villages/count')
+def get_master_village_count():
+    """Get total village count with optional filters"""
+    db = get_database()
+    district_code = request.args.get('district', type=int)
+    taluk_code = request.args.get('taluk', type=int)
+    hobli_code = request.args.get('hobli', type=int)
+    
+    villages = db.get_master_villages_for_search(district_code, taluk_code, hobli_code)
+    return jsonify({
+        'count': len(villages),
+        'filters': {
+            'district': district_code,
+            'taluk': taluk_code,
+            'hobli': hobli_code
+        }
+    })
 
 @app.route('/api/db/sessions/<session_id>/resume')
 def get_resume_state(session_id):
