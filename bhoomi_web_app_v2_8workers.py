@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
 ╔══════════════════════════════════════════════════════════════════════════════════════╗
-║                  POWER-BHOOMI v3.0 - BULLETPROOF EDITION                             ║
+║                  POWER-BHOOMI v3.0 - BULLETPROOF EDITION (8 WORKERS)                 ║
 ║                        Karnataka Land Records Search Tool                             ║
 ╠══════════════════════════════════════════════════════════════════════════════════════╣
 ║  Features:                                                                            ║
-║  • 4 parallel browser workers (optimized for macOS)                                  ║
+║  • 8 parallel browser workers (HIGH-SPEED optimized for macOS)                       ║
 ║  • SESSION EXPIRATION DETECTION & AUTO-RECOVERY                                      ║
 ║  • ZERO VILLAGES MISSED - Retry on session expire, not skip!                         ║
 ║  • Sequential survey iteration (1, 2, 3... no skips)                                 ║
@@ -48,15 +48,15 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 # ═══════════════════════════════════════════════════════════════════════════════════════
 
 class Config:
-    """Mac-optimized configuration for speed"""
+    """Mac-optimized configuration for HIGH-SPEED processing with 8 workers"""
     # Server
     HOST = '0.0.0.0'
     PORT = 5001
     DEBUG = True
     
-    # Parallel Processing - 4 fast workers for Mac
-    MAX_WORKERS = 4
-    WORKER_STARTUP_DELAY = 0.5  # Fast startup on Mac
+    # Parallel Processing - 8 HIGH-SPEED workers for Mac
+    MAX_WORKERS = 8
+    WORKER_STARTUP_DELAY = 0.7  # Slightly longer delay for 8 workers to prevent Chrome conflicts
     
     # Timeouts (seconds) - Optimized for Mac speed
     PAGE_LOAD_TIMEOUT = 20
@@ -1860,7 +1860,7 @@ class ParallelSearchCoordinator:
             # Handle both "2" and "2.0" formats
             district_code = params['district_code']
             if district_code not in dist_opts:
-                # Try with .0 suffix (portal uses float codes)
+                # Try with .0 suffix
                 district_code_float = f"{district_code}.0" if '.' not in str(district_code) else district_code
                 if district_code_float in dist_opts:
                     district_code = district_code_float
@@ -1888,7 +1888,7 @@ class ParallelSearchCoordinator:
             # Handle both "5" and "5.0" formats
             taluk_code = params['taluk_code']
             if taluk_code not in taluk_opts:
-                # Try with .0 suffix (portal uses float codes)
+                # Try with .0 suffix
                 taluk_code_float = f"{taluk_code}.0" if '.' not in str(taluk_code) else taluk_code
                 if taluk_code_float in taluk_opts:
                     taluk_code = taluk_code_float
@@ -2497,7 +2497,7 @@ HTML_TEMPLATE = '''
         /* Workers Panel */
         .workers-grid {
             display: grid;
-            grid-template-columns: repeat(2, 1fr);
+            grid-template-columns: repeat(4, 1fr);
             gap: 0.75rem;
             margin-bottom: 1rem;
         }
@@ -2760,6 +2760,10 @@ HTML_TEMPLATE = '''
         .owner-cell.match { color: var(--success); }
         
         /* Responsive */
+        @media (max-width: 1400px) {
+            .workers-grid { grid-template-columns: repeat(3, 1fr); }
+        }
+        
         @media (max-width: 1200px) {
             .main-container { grid-template-columns: 1fr; }
             .workers-grid { grid-template-columns: repeat(2, 1fr); }
@@ -2781,7 +2785,7 @@ HTML_TEMPLATE = '''
                     <p>Parallel Search Engine</p>
                 </div>
             </div>
-            <div class="version-badge">v3.0 🛡️ Bulletproof • 4 Workers</div>
+            <div class="version-badge">v3.0 🛡️ Bulletproof • 8 HIGH-SPEED Workers</div>
         </div>
     </header>
     
@@ -2897,6 +2901,42 @@ HTML_TEMPLATE = '''
                     <div class="worker-card" id="worker-3">
                         <div class="worker-header">
                             <span class="worker-id">🖥️ Worker 4</span>
+                            <span class="worker-status idle">Idle</span>
+                        </div>
+                        <div class="worker-village">Waiting to start...</div>
+                        <div class="worker-progress"><div class="worker-progress-fill" style="width: 0%"></div></div>
+                        <div class="worker-stats"><span>0/0 villages</span><span>0 records</span></div>
+                    </div>
+                    <div class="worker-card" id="worker-4">
+                        <div class="worker-header">
+                            <span class="worker-id">🖥️ Worker 5</span>
+                            <span class="worker-status idle">Idle</span>
+                        </div>
+                        <div class="worker-village">Waiting to start...</div>
+                        <div class="worker-progress"><div class="worker-progress-fill" style="width: 0%"></div></div>
+                        <div class="worker-stats"><span>0/0 villages</span><span>0 records</span></div>
+                    </div>
+                    <div class="worker-card" id="worker-5">
+                        <div class="worker-header">
+                            <span class="worker-id">🖥️ Worker 6</span>
+                            <span class="worker-status idle">Idle</span>
+                        </div>
+                        <div class="worker-village">Waiting to start...</div>
+                        <div class="worker-progress"><div class="worker-progress-fill" style="width: 0%"></div></div>
+                        <div class="worker-stats"><span>0/0 villages</span><span>0 records</span></div>
+                    </div>
+                    <div class="worker-card" id="worker-6">
+                        <div class="worker-header">
+                            <span class="worker-id">🖥️ Worker 7</span>
+                            <span class="worker-status idle">Idle</span>
+                        </div>
+                        <div class="worker-village">Waiting to start...</div>
+                        <div class="worker-progress"><div class="worker-progress-fill" style="width: 0%"></div></div>
+                        <div class="worker-stats"><span>0/0 villages</span><span>0 records</span></div>
+                    </div>
+                    <div class="worker-card" id="worker-7">
+                        <div class="worker-header">
+                            <span class="worker-id">🖥️ Worker 8</span>
                             <span class="worker-status idle">Idle</span>
                         </div>
                         <div class="worker-village">Waiting to start...</div>
@@ -3787,14 +3827,15 @@ def get_resumable_sessions():
 if __name__ == '__main__':
     print("""
 ╔══════════════════════════════════════════════════════════════════════════════════════╗
-║                  POWER-BHOOMI v3.0 - BULLETPROOF EDITION (4 WORKERS)                 ║
+║              POWER-BHOOMI v3.0 - BULLETPROOF EDITION (8 HIGH-SPEED WORKERS)          ║
 ╠══════════════════════════════════════════════════════════════════════════════════════╣
 ║                                                                                      ║
 ║   🍎 Optimized for macOS                                                             ║
-║   🚀 4 Fast Parallel Browser Workers                                                 ║
+║   🚀 8 HIGH-SPEED Parallel Browser Workers (2x Performance)                          ║
 ║   📊 Sequential Survey Checking (1, 2, 3... no skips)                                ║
 ║   ⚡ Speed-Optimized Timeouts                                                        ║
 ║   📁 CSV Auto-Saves to Downloads                                                     ║
+║   💾 Real-time SQLite Database Persistence                                           ║
 ║                                                                                      ║
 ║   🌐 Open your browser and navigate to:                                              ║
 ║                                                                                      ║

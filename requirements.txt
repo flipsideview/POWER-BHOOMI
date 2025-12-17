@@ -18,6 +18,10 @@ webdriver-manager>=4.0.0
 pandas>=2.0.0
 beautifulsoup4>=4.12.0
 
+# Enterprise Features
+pyyaml>=6.0.0
+psutil>=5.9.0
+
 # Jupyter Notebook (optional - for notebook version)
 jupyter>=1.0.0
 ipykernel>=6.0.0

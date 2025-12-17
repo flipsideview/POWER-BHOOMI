@@ -1,0 +1,144 @@
+# POWER-BHOOMI Enterprise Configuration
+# Version: 3.0.0
+
+app:
+  name: "POWER-BHOOMI"
+  version: "3.0.0"
+  host: "0.0.0.0"
+  port: 5001
+  debug: false
+  auto_open_browser: true
+
+workers:
+  max_workers: 4
+  startup_delay: 0.5
+  page_load_timeout: 20
+  element_wait_timeout: 8
+  post_click_wait: 4
+  post_select_wait: 1.5
+  max_hissa_before_restart: 200
+  max_session_retries: 3
+
+database:
+  # Use environment variables for paths, fallback to defaults
+  path: "${DATA_DIR}/bhoomi_data.db"
+  backup_enabled: true
+  backup_interval: 86400  # Daily (in seconds)
+  backup_retention: 30  # Keep backups for 30 days
+  max_backup_size: 1073741824  # 1GB
+
+paths:
+  data_dir: "~/Documents/POWER-BHOOMI"
+  log_dir: "~/Library/Logs/POWER-BHOOMI"
+  cache_dir: "~/Library/Caches/POWER-BHOOMI"
+  config_dir: "~/.config/power-bhoomi"
+  downloads_dir: "~/Downloads"
+
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
+  file: "${LOG_DIR}/application.log"
+  max_size: 10485760  # 10MB
+  backup_count: 5
+  format: "%(asctime)s | %(levelname)-7s | %(name)-15s | %(message)s"
+  date_format: "%Y-%m-%d %H:%M:%S"
+  console_enabled: true
+  file_enabled: true
+
+security:
+  enable_https: false
+  secret_key: "${SECRET_KEY}"  # Generated during installation
+  allowed_hosts:
+    - "localhost"
+    - "127.0.0.1"
+    - "0.0.0.0"
+  cors_enabled: true
+  cors_origins:
+    - "http://localhost:5001"
+    - "http://127.0.0.1:5001"
+  rate_limiting:
+    enabled: false
+    requests_per_minute: 60
+
+bhoomi_portal:
+  echawadi_base: "https://rdservices.karnataka.gov.in/echawadi/Home"
+  service2_url: "https://landrecords.karnataka.gov.in/Service2/"
+  default_max_survey: 200
+  empty_survey_threshold: 999999  # Disabled - check all surveys
+  accuracy_mode: true
+  process_all_periods: true
+
+updates:
+  check_on_startup: true
+  auto_update: false
+  update_url: "https://api.example.com/power-bhoomi/updates"
+  update_channel: "stable"  # stable, beta, dev
+
+monitoring:
+  health_check_enabled: true
+  health_check_endpoint: "/health"
+  metrics_enabled: true
+  metrics_endpoint: "/metrics"
+  uptime_tracking: true
+
+notifications:
+  enabled: true
+  on_search_complete: true
+  on_error: true
+  on_update_available: true
+  method: "system"  # system, email, none
+
+csv_export:
+  auto_export: true
+  export_on_complete: true
+  export_format: "csv"
+  include_timestamp: true
+  output_directory: "${DOWNLOADS_DIR}"
+
+advanced:
+  chrome_headless: true
+  chrome_disable_gpu: true
+  chrome_disable_images: true
+  chrome_page_load_strategy: "eager"
+  worker_staggered_start: true
+  enable_cache: true
+  cache_ttl: 3600  # 1 hour
+
+# Feature Flags
+features:
+  database_persistence: true
+  session_recovery: true
+  browser_crash_recovery: true
+  portal_alert_handling: true
+  village_progress_tracking: true
+  skipped_items_retry: true
+  real_time_updates: true
+  admin_dashboard: true
+  api_endpoints: true
+
+# Default search parameters
+defaults:
+  district_code: ""
+  taluk_code: ""
+  hobli_code: "all"
+  village_code: "all"
+  max_survey: 200
+
+# UI Preferences
+ui:
+  theme: "dark"
+  language: "en"  # en, kn (Kannada)
+  date_format: "DD/MM/YYYY"
+  time_format: "24h"
+  show_worker_details: true
+  show_real_time_logs: true
+  records_display_limit: 100
+  auto_refresh_interval: 1500  # ms
+
+# System
+system:
+  temp_dir: "/tmp/power-bhoomi"
+  pid_file: "${DATA_DIR}/power-bhoomi.pid"
+  lock_file: "${DATA_DIR}/power-bhoomi.lock"
+  max_memory_mb: 8192  # 8GB
+  gc_interval: 300  # seconds
+
