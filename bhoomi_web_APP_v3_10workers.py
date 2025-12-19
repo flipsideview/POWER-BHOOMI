@@ -3916,7 +3916,8 @@ class ParallelSearchCoordinator:
         import tempfile
         from selenium import webdriver
         from selenium.webdriver.common.by import By
-        from selenium.webdriver.support.ui import Select
+        from selenium.webdriver.support.ui import Select, WebDriverWait
+        from selenium.webdriver.support import expected_conditions as EC
         from selenium.webdriver.chrome.options import Options
         from selenium.webdriver.chrome.service import Service
         from webdriver_manager.chrome import ChromeDriverManager
@@ -3938,12 +3939,25 @@ class ParallelSearchCoordinator:
         
         # Use cached ChromeDriver path
         driver = webdriver.Chrome(service=CachedChromeDriver.get_service(), options=options)
+        driver.set_page_load_timeout(30)  # Allow more time for slow networks
         
         try:
+            logger.info(f"Loading portal: {Config.SERVICE2_URL}")
             driver.get(Config.SERVICE2_URL)
-            time.sleep(5)  # Increased wait for page to fully load
             
             IDS = Config.ELEMENT_IDS
+            
+            # STABILITY FIX: Wait for district dropdown to be present and have options
+            logger.info("Waiting for page to fully load...")
+            try:
+                WebDriverWait(driver, 20).until(
+                    EC.presence_of_element_located((By.ID, IDS['district']))
+                )
+                # Additional wait for dropdown to populate
+                time.sleep(3)
+            except Exception as wait_error:
+                logger.error(f"Page load timeout: {wait_error}")
+                raise Exception(f"Portal page failed to load within 20 seconds. Please check your internet connection.")
             
             # Select district with retry and validation
             logger.info(f"Selecting district: {params.get('district_code')}")
